@@ -11,8 +11,7 @@ enum class QuatFilterSel {
     NONE,
     MADGWICK,
     MAHONY,
-    EKF,
-	ESKF,
+    EKF
 };
 
 class QuaternionFilter {
@@ -31,32 +30,10 @@ class QuaternionFilter {
     Matrix4d Q = Matrix4d::Identity() * 0.0001;
     Matrix3d Ra = Matrix3d::Identity() * 0.1;
     Matrix3d Rm = Matrix3d::Identity() * 0.5;
-    
-	// for eskf
-	Matrix6d Pk1 = Matrix6d::Identity() * 0.00001;
-	Matrix6d Q_delta_X = Matrix6d::Identity() * 0.000001;
-	Matrix6d Rk = Matrix6d::Identity() * 0.1;
-	Vector3d Bg(0,0,0);
 	
     QuatFilterSel filter_sel{QuatFilterSel::MADGWICK};
     double deltaT{0.};
     uint32_t newTime{0}, oldTime{0};
-	Matrix3d skew_symmetric(Vector3d v){
-		Matrix3d s;
-		s <<  0,   -v(2),  v(1),
-			 v(2),   0,   -v(0),
-		    -v(1), v(0),    0;
-		return s;
-	}
-	Vector4d quaternProd(Vector4d a,Vector4d b){
-		Vector4d q;
-		q(0) = a(0)*b(0)-a(1)*b(1)-a(2)*b(2)-a(3)*b(3);
-		q(1) = a(0)*b(1)+a(1)*b(0)+a(2)*b(3)-a(3)*b(2);
-		q(2) = a(0)*b(2)-a(1)*b(3)+a(2)*b(0)+a(3)*b(1);
-		q(3) = a(0)*b(3)+a(1)*b(2)-a(2)*b(1)+a(3)*b(0);
-		if(q(0)<0)
-			q=-q;
-	}
 
 public:
     void select_filter(QuatFilterSel sel) {
@@ -415,112 +392,7 @@ public:
         q[3] = x(3);
         return true;
     }
-	
-	bool eskf(float ax, float ay, float az, float gx, float gy, float gz, float mx, float my, float mz, float* q){
-		float tmp;
-		// Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-        Vector3d Za(ax,ay,az); 
-        tmp = Za.norm();
-        if (tmp == 0.f) return false;
-        // Normalise accelerometer (assumed to measure the direction of gravity in body frame)
-        Za = Za/tmp;
-       
-        Vector3d Zm(mx,my,mz); 
-        tmp = Zm.norm();
-        if(tmp == 0.f) return false;
-        Zm = Zm/tmp;
-		
-		//compute reference direction of magnetic field
-        //这里计算得到的是地磁计在理论地磁坐标系下的机体上三个轴的分量
-        float hx = 2*Zm(0)*(0.5 - q2q2 - q3q3) + 2*Zm(1)*(q1q2 - q0q3) + 2*Zm(2)*(q1q3 + q0q2);
-        float hy = 2*Zm(0)*(q1q2 + q0q3) + 2*Zm(1)*(0.5 - q1q1 - q3q3) + 2*Zm(2)*(q2q3 - q0q1);
-        float hz = 2*Zm(0)*(q1q3 - q0q2) + 2*Zm(1)*(q2q3 + q0q1) + 2*Zm(2)*(0.5 - q1q1 - q2q2);   
 
-        //bx计算的是当前航向角和磁北的夹角，也就是北天东坐标下的航向角
-        //当罗盘水平旋转的时候，航向角在0-360之间变化
-        float bx = sqrt((hx*hx) + (hy*hy));
-        float bz = hz; 
-		
-		//误差状态卡尔曼滤波，名义状态更新:
-		gx = (gx-Bg(0))*deltaT;
-		gy = (gy-Bg(1))*deltaT;
-		gz = (gz-Bg(2))*deltaT;
-		Vector4d x(q[0],q[1],q[2],q[3]);
-        Matrix4d Ak;
-        Ak << 1,  -gx/2, -gy/2, -gz/2,
-              gx/2,  1,   gz/2, -gy/2,
-              gy/2, -gz/2,  1,   gx/2,
-              gz/2,  gy/2, -gx/2,  1;
-        x = Ak * x;
-        x = x/x.norm();
-		
-		//误差状态卡尔曼滤波，预测过程：
-		Vector3d u(gx,gy,gz);
-		float delta_theta = u.norm();
-		u = u/delta_theta;
-		Matrix3d R_u_delta_theta = Matrix3d::Identity() - skew_symmetric(u)*sin(delta_theta) + skew_symmetric(u)*skew_symmetric(u)*(1-cos(delta_theta));
-		Matrix6d F_delta_X;
-		F_delta_X << R_u_delta_theta, -Matrix3d::Identity()*deltaT,
-					 Matrix3d::Zero(),Matrix3d::Identity();
-		Matrix6d P_k = F_delta_X*Pk1*F_delta_X.transpose()+Q_delta_X;
-		
-		//误差状态卡尔曼滤波，校正过程：
-		Vector3d R1(x(0)*x(0)+x(1)*x(1)-x(2)*x(2)-x(3)*x(3),
-				    2*(x(1)*x(2)-x(0)*x(3)),
-				    2*(x(1)*x(3)+x(0)*x(2)));
-        
-        Vector3d R3(2*(x(1)*x(3)-x(0)*x(2)),
-                    2*(x(0)*x(1)+x(2)*x(3)),
-                    x(0)*x(0)-x(1)*x(1)-x(2)*x(2)+x(3)*x(3));
-                    
-        MatrixXd J1(3,4),J3(3,4);
-        J1 << x(0), x(1), -x(2), -x(3),
-             -x(3), x(2),  x(1), -x(0),
-              x(2), x(3),  x(0),  x(1);
-        J1 = 2*J1;
-        J3 <<  -x(2),  x(3), -x(0),  x(1),
-                x(1),  x(0),  x(3),  x(2),
-                x(0), -x(1), -x(2),  x(3);
-        J3 = 2*J3;
-		
-		MatrixXd H_x(6,7);
-		H_x <<     J3,     Matrix3d::Zero(),
-			   bx*J1+bz*J3,Matrix3d::Zero();
-	    MatrixXd Q_delta_theta(4,3);
-		Q_delta_theta << -x(1), -x(2), -x(3),
-						  x(0), -x(3),  x(2),
-						  x(3),  x(0), -x(1),
-						 -x(2),  x(1),  x(0);
-		Q_delta_theta = 0.5*Q_delta_theta;
-		MatrixXd X_delta_x(7,6);
-		X_delta_x <<  Q_delta_theta,   MatrixXd::Zero(4,3),
-					 Matrix3d::Zero(), Matrix3d::Identity();
-		Matrix6d Hk = H_x * X_delta_x;
-		Matrix6d Kk = P_k*Hk.transpose()*((Hk*P_k*Hk.transpose()+Rk).inverse());
-		Vector6d z;
-		z.segment(0,3) = Za;
-		z.segment(3,3) = Zm;
-		Vector3d h2 = bx * R1 + bz * R3;
-		Vector6d h;
-		h.segment(0,3) = R1;
-		h.segment(3,3) = h2;
-		Vector6d delta_X_hat = Kk*(z-h);
-		P_k = (Matrix6d::Identity()-Kk*Hk)*P_k;
-		
-		//误差状态卡尔曼滤波，向名义状态注入误差校正
-		Vector4d delta_q;
-		delta_q(0) = 1;
-		delta_q(1,3) = delta_X_hat.head(3)/2;
-		Vector4d Q2 = quaternProd(x,delta_q);
-		Q2 = Q2/Q2.norm();
-		Bg = Bg+delta_X_hat.tail(3);
-		
-		//误差状态卡尔曼滤波，滤波器重置
-		Matrix6d G;
-		G << Matrix3d::Identity()-skew_symmetric(-delta_X_hat.tail(3)/2), Matrix3d::Zero(),
-			 Matrix3d::Zero(),  Matrix3d::Identity();
-		P_k = G*P_k*P_k.transpose();
-	}
 };
 
 #endif  // QUATERNIONFILTER_H
